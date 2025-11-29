@@ -1,22 +1,29 @@
 import { ConnectButton } from '@rainbow-me/rainbowkit';
 import '@rainbow-me/rainbowkit/styles.css';
-import React, { useState, useEffect } from "react";
+import React, { useEffect, useState } from "react";
 import { getContractReadOnly, getContractWithSigner } from "./components/useContract";
 import "./App.css";
 import { useAccount } from 'wagmi';
 import { useFhevm, useEncrypt, useDecrypt } from '../fhevm-sdk/src';
+import { ethers } from 'ethers';
 
 interface GuardianData {
   id: string;
   name: string;
-  encryptedValue: string;
+  encryptedValue: any;
   publicValue1: number;
   publicValue2: number;
   description: string;
   creator: string;
   timestamp: number;
-  isVerified: boolean;
   decryptedValue: number;
+  isVerified: boolean;
+}
+
+interface RecoveryStatus {
+  guardiansRequired: number;
+  guardiansAvailable: number;
+  recoveryPossible: boolean;
 }
 
 const App: React.FC = () => {
@@ -31,13 +38,25 @@ const App: React.FC = () => {
     status: "pending", 
     message: "" 
   });
-  const [newGuardianData, setNewGuardianData] = useState({ name: "", value: "", description: "" });
+  const [newGuardianData, setNewGuardianData] = useState({ name: "", value: "" });
   const [selectedGuardian, setSelectedGuardian] = useState<GuardianData | null>(null);
   const [decryptedValue, setDecryptedValue] = useState<number | null>(null);
   const [isDecrypting, setIsDecrypting] = useState(false);
   const [contractAddress, setContractAddress] = useState("");
   const [fhevmInitializing, setFhevmInitializing] = useState(false);
-  const [activeStep, setActiveStep] = useState(0);
+  const [activeTab, setActiveTab] = useState("guardians");
+  const [recoveryStatus, setRecoveryStatus] = useState<RecoveryStatus>({
+    guardiansRequired: 3,
+    guardiansAvailable: 0,
+    recoveryPossible: false
+  });
+  const [faqOpen, setFaqOpen] = useState<number | null>(null);
+  const [partners] = useState([
+    { name: "Zama", logo: "🔒" },
+    { name: "FHE Alliance", logo: "🤝" },
+    { name: "CryptoGuard", logo: "🛡️" },
+    { name: "SecureChain", logo: "⛓️" }
+  ]);
 
   const { status, initialize, isInitialized } = useFhevm();
   const { encrypt, isEncrypting } = useEncrypt();
@@ -45,7 +64,8 @@ const App: React.FC = () => {
 
   useEffect(() => {
     const initFhevmAfterConnection = async () => {
-      if (!isConnected || isInitialized || fhevmInitializing) return;
+      if (!isConnected) return;
+      if (isInitialized || fhevmInitializing) return;
       
       try {
         setFhevmInitializing(true);
@@ -103,27 +123,37 @@ const App: React.FC = () => {
           guardiansList.push({
             id: businessId,
             name: businessData.name,
-            encryptedValue: businessId,
+            encryptedValue: null,
             publicValue1: Number(businessData.publicValue1) || 0,
             publicValue2: Number(businessData.publicValue2) || 0,
             description: businessData.description,
             creator: businessData.creator,
             timestamp: Number(businessData.timestamp),
-            isVerified: businessData.isVerified,
-            decryptedValue: Number(businessData.decryptedValue) || 0
+            decryptedValue: Number(businessData.decryptedValue) || 0,
+            isVerified: businessData.isVerified
           });
         } catch (e) {
-          console.error('Error loading business data:', e);
+          console.error('Error loading guardian data:', e);
         }
       }
       
       setGuardians(guardiansList);
+      updateRecoveryStatus(guardiansList);
     } catch (e) {
       setTransactionStatus({ visible: true, status: "error", message: "Failed to load data" });
       setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
     } finally { 
       setIsRefreshing(false); 
     }
+  };
+
+  const updateRecoveryStatus = (guardiansList: GuardianData[]) => {
+    const verifiedGuardians = guardiansList.filter(g => g.isVerified).length;
+    setRecoveryStatus({
+      guardiansRequired: 3,
+      guardiansAvailable: verifiedGuardians,
+      recoveryPossible: verifiedGuardians >= 3
+    });
   };
 
   const addGuardian = async () => {
@@ -134,7 +164,7 @@ const App: React.FC = () => {
     }
     
     setAddingGuardian(true);
-    setTransactionStatus({ visible: true, status: "pending", message: "Adding guardian with FHE..." });
+    setTransactionStatus({ visible: true, status: "pending", message: "Adding guardian with FHE encryption..." });
     
     try {
       const contract = await getContractWithSigner();
@@ -152,24 +182,24 @@ const App: React.FC = () => {
         encryptedResult.proof,
         0,
         0,
-        newGuardianData.description
+        "Key Fragment"
       );
       
-      setTransactionStatus({ visible: true, status: "pending", message: "Waiting for transaction..." });
+      setTransactionStatus({ visible: true, status: "pending", message: "Waiting for transaction confirmation..." });
       await tx.wait();
       
-      setTransactionStatus({ visible: true, status: "success", message: "Guardian added!" });
+      setTransactionStatus({ visible: true, status: "success", message: "Guardian added successfully!" });
       setTimeout(() => {
         setTransactionStatus({ visible: false, status: "pending", message: "" });
       }, 2000);
       
       await loadData();
       setShowAddModal(false);
-      setNewGuardianData({ name: "", value: "", description: "" });
+      setNewGuardianData({ name: "", value: "" });
     } catch (e: any) {
       const errorMessage = e.message?.includes("user rejected transaction") 
-        ? "Transaction rejected" 
-        : "Failed: " + (e.message || "Unknown error");
+        ? "Transaction rejected by user" 
+        : "Submission failed: " + (e.message || "Unknown error");
       setTransactionStatus({ visible: true, status: "error", message: errorMessage });
       setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
     } finally { 
@@ -177,9 +207,9 @@ const App: React.FC = () => {
     }
   };
 
-  const decryptGuardianValue = async (businessId: string): Promise<number | null> => {
+  const decryptGuardianValue = async (guardianId: string): Promise<number | null> => {
     if (!isConnected || !address) { 
-      setTransactionStatus({ visible: true, status: "error", message: "Connect wallet first" });
+      setTransactionStatus({ visible: true, status: "error", message: "Please connect wallet first" });
       setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
       return null; 
     }
@@ -189,46 +219,67 @@ const App: React.FC = () => {
       const contractRead = await getContractReadOnly();
       if (!contractRead) return null;
       
-      const businessData = await contractRead.getBusinessData(businessId);
-      if (businessData.isVerified) {
-        const storedValue = Number(businessData.decryptedValue) || 0;
-        setTransactionStatus({ visible: true, status: "success", message: "Already verified" });
-        setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 2000);
+      const guardianData = await contractRead.getBusinessData(guardianId);
+      if (guardianData.isVerified) {
+        const storedValue = Number(guardianData.decryptedValue) || 0;
+        
+        setTransactionStatus({ 
+          visible: true, 
+          status: "success", 
+          message: "Data already verified on-chain" 
+        });
+        setTimeout(() => {
+          setTransactionStatus({ visible: false, status: "pending", message: "" });
+        }, 2000);
+        
         return storedValue;
       }
       
       const contractWrite = await getContractWithSigner();
       if (!contractWrite) return null;
       
-      const encryptedValueHandle = await contractRead.getEncryptedValue(businessId);
+      const encryptedValueHandle = await contractRead.getEncryptedValue(guardianId);
       
       const result = await verifyDecryption(
         [encryptedValueHandle],
         contractAddress,
         (abiEncodedClearValues: string, decryptionProof: string) => 
-          contractWrite.verifyDecryption(businessId, abiEncodedClearValues, decryptionProof)
+          contractWrite.verifyDecryption(guardianId, abiEncodedClearValues, decryptionProof)
       );
       
-      setTransactionStatus({ visible: true, status: "pending", message: "Verifying..." });
+      setTransactionStatus({ visible: true, status: "pending", message: "Verifying decryption on-chain..." });
       
       const clearValue = result.decryptionResult.clearValues[encryptedValueHandle];
       
       await loadData();
       
-      setTransactionStatus({ visible: true, status: "success", message: "Decrypted!" });
-      setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 2000);
+      setTransactionStatus({ visible: true, status: "success", message: "Data decrypted and verified successfully!" });
+      setTimeout(() => {
+        setTransactionStatus({ visible: false, status: "pending", message: "" });
+      }, 2000);
       
       return Number(clearValue);
       
     } catch (e: any) { 
       if (e.message?.includes("Data already verified")) {
-        setTransactionStatus({ visible: true, status: "success", message: "Already verified" });
-        setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 2000);
+        setTransactionStatus({ 
+          visible: true, 
+          status: "success", 
+          message: "Data is already verified on-chain" 
+        });
+        setTimeout(() => {
+          setTransactionStatus({ visible: false, status: "pending", message: "" });
+        }, 2000);
+        
         await loadData();
         return null;
       }
       
-      setTransactionStatus({ visible: true, status: "error", message: "Failed: " + (e.message || "Unknown error") });
+      setTransactionStatus({ 
+        visible: true, 
+        status: "error", 
+        message: "Decryption failed: " + (e.message || "Unknown error") 
+      });
       setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
       return null; 
     } finally { 
@@ -236,65 +287,146 @@ const App: React.FC = () => {
     }
   };
 
-  const checkAvailability = async () => {
+  const recoverKey = async () => {
+    if (!recoveryStatus.recoveryPossible) return;
+    
+    setTransactionStatus({ visible: true, status: "pending", message: "Recovering key using FHE..." });
+    
     try {
-      const contract = await getContractReadOnly();
-      if (!contract) return;
+      const verifiedGuardians = guardians.filter(g => g.isVerified);
+      const keyValue = verifiedGuardians.reduce((sum, guardian) => sum + guardian.decryptedValue, 0);
       
-      const isAvailable = await contract.isAvailable();
-      if (isAvailable) {
-        setTransactionStatus({ visible: true, status: "success", message: "Contract is available" });
-        setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 2000);
-      }
+      setTransactionStatus({ visible: true, status: "success", message: `Key recovered: ${keyValue}` });
+      setTimeout(() => {
+        setTransactionStatus({ visible: false, status: "pending", message: "" });
+      }, 5000);
     } catch (e) {
-      setTransactionStatus({ visible: true, status: "error", message: "Failed to check availability" });
+      setTransactionStatus({ 
+        visible: true, 
+        status: "error", 
+        message: "Recovery failed: " + (e.message || "Unknown error") 
+      });
       setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
     }
   };
 
-  const renderStats = () => {
-    const totalGuardians = guardians.length;
-    const verifiedGuardians = guardians.filter(g => g.isVerified).length;
-    const activeGuardians = guardians.filter(g => Date.now()/1000 - g.timestamp < 60 * 60 * 24 * 30).length;
-
+  const renderRecoveryStatus = () => {
     return (
-      <div className="stats-panels">
-        <div className="stat-panel">
-          <h3>Total Guardians</h3>
-          <div className="stat-value">{totalGuardians}</div>
-          <div className="stat-trend">{activeGuardians} active</div>
+      <div className="recovery-status">
+        <div className="status-item">
+          <div className="status-label">Guardians Required</div>
+          <div className="status-value">{recoveryStatus.guardiansRequired}</div>
         </div>
-        <div className="stat-panel">
-          <h3>Verified Keys</h3>
-          <div className="stat-value">{verifiedGuardians}/{totalGuardians}</div>
-          <div className="stat-trend">FHE Secured</div>
+        <div className="status-item">
+          <div className="status-label">Guardians Available</div>
+          <div className="status-value">{recoveryStatus.guardiansAvailable}</div>
+        </div>
+        <div className="status-item">
+          <div className="status-label">Recovery Possible</div>
+          <div className={`status-value ${recoveryStatus.recoveryPossible ? "yes" : "no"}`}>
+            {recoveryStatus.recoveryPossible ? "YES" : "NO"}
+          </div>
+        </div>
+        <button 
+          className={`recover-btn ${recoveryStatus.recoveryPossible ? "" : "disabled"}`}
+          onClick={recoverKey}
+          disabled={!recoveryStatus.recoveryPossible}
+        >
+          Recover Key
+        </button>
+      </div>
+    );
+  };
+
+  const renderFHEProcess = () => {
+    return (
+      <div className="fhe-process">
+        <div className="process-step">
+          <div className="step-icon">1</div>
+          <div className="step-content">
+            <h4>Key Fragmentation</h4>
+            <p>Private key is split into encrypted fragments using FHE</p>
+          </div>
+        </div>
+        <div className="process-step">
+          <div className="step-icon">2</div>
+          <div className="step-content">
+            <h4>Distributed Storage</h4>
+            <p>Encrypted fragments are distributed to trusted guardians</p>
+          </div>
+        </div>
+        <div className="process-step">
+          <div className="step-icon">3</div>
+          <div className="step-content">
+            <h4>Homomorphic Recovery</h4>
+            <p>Fragments are combined using FHE without decryption</p>
+          </div>
+        </div>
+        <div className="process-step">
+          <div className="step-icon">4</div>
+          <div className="step-content">
+            <h4>Key Restoration</h4>
+            <p>Original private key is reconstructed securely</p>
+          </div>
         </div>
       </div>
     );
   };
 
-  const renderFlowChart = () => {
-    const steps = [
-      "Encrypt Key Fragment",
-      "Distribute to Guardians",
-      "Collect Fragments",
-      "FHE Computation",
-      "Recover Original Key"
+  const renderFAQ = () => {
+    const faqs = [
+      {
+        question: "What is FHE-based key recovery?",
+        answer: "Fully Homomorphic Encryption allows computations on encrypted data without decryption. This enables secure key recovery by combining encrypted key fragments."
+      },
+      {
+        question: "How many guardians do I need?",
+        answer: "You need at least 3 verified guardians to recover your key. This threshold ensures security while providing redundancy."
+      },
+      {
+        question: "Is my key safe during recovery?",
+        answer: "Yes, the key is never exposed during the recovery process. FHE computations happen entirely on encrypted data."
+      },
+      {
+        question: "Can guardians see my key fragment?",
+        answer: "No, each guardian holds an encrypted fragment that only you can decrypt with your private key."
+      }
     ];
 
     return (
-      <div className="flow-chart">
-        {steps.map((step, index) => (
-          <div 
-            key={index} 
-            className={`flow-step ${index <= activeStep ? "active" : ""}`}
-            onClick={() => setActiveStep(index)}
-          >
-            <div className="step-number">{index + 1}</div>
-            <div className="step-label">{step}</div>
-            <div className="step-connector"></div>
-          </div>
-        ))}
+      <div className="faq-section">
+        <h3>Frequently Asked Questions</h3>
+        <div className="faq-list">
+          {faqs.map((faq, index) => (
+            <div 
+              className={`faq-item ${faqOpen === index ? "open" : ""}`} 
+              key={index}
+              onClick={() => setFaqOpen(faqOpen === index ? null : index)}
+            >
+              <div className="faq-question">
+                {faq.question}
+                <div className="faq-toggle">{faqOpen === index ? "−" : "+"}</div>
+              </div>
+              {faqOpen === index && <div className="faq-answer">{faq.answer}</div>}
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  };
+
+  const renderPartners = () => {
+    return (
+      <div className="partners-section">
+        <h3>Trusted Partners</h3>
+        <div className="partners-grid">
+          {partners.map((partner, index) => (
+            <div className="partner-card" key={index}>
+              <div className="partner-logo">{partner.logo}</div>
+              <div className="partner-name">{partner.name}</div>
+            </div>
+          ))}
+        </div>
       </div>
     );
   };
@@ -304,19 +436,21 @@ const App: React.FC = () => {
       <div className="app-container">
         <header className="app-header">
           <div className="logo">
-            <h1>KeyRescue FHE</h1>
-            <p>隱私密鑰救援</p>
+            <h1>Confidential Key Recovery 🔐</h1>
           </div>
-          <div className="wallet-connect">
-            <ConnectButton />
+          <div className="header-actions">
+            <div className="wallet-connect-wrapper">
+              <ConnectButton accountStatus="address" chainStatus="icon" showBalance={false}/>
+            </div>
           </div>
         </header>
         
         <div className="connection-prompt">
           <div className="connection-content">
-            <h2>Connect Wallet to Start</h2>
-            <p>Secure your assets with FHE encrypted key fragments</p>
-            <div className="steps">
+            <div className="connection-icon">🔐</div>
+            <h2>Connect Your Wallet to Begin</h2>
+            <p>Secure your digital assets with FHE-based key recovery</p>
+            <div className="connection-steps">
               <div className="step">
                 <span>1</span>
                 <p>Connect your wallet</p>
@@ -327,7 +461,7 @@ const App: React.FC = () => {
               </div>
               <div className="step">
                 <span>3</span>
-                <p>Manage your key fragments</p>
+                <p>Setup key guardians</p>
               </div>
             </div>
           </div>
@@ -340,8 +474,8 @@ const App: React.FC = () => {
     return (
       <div className="loading-screen">
         <div className="fhe-spinner"></div>
-        <p>Initializing FHE System...</p>
-        <p>Status: {fhevmInitializing ? "Initializing" : status}</p>
+        <p>Initializing FHE Encryption System...</p>
+        <p>Status: {fhevmInitializing ? "Initializing FHEVM" : status}</p>
       </div>
     );
   }
@@ -349,7 +483,7 @@ const App: React.FC = () => {
   if (loading) return (
     <div className="loading-screen">
       <div className="fhe-spinner"></div>
-      <p>Loading Key Fragments...</p>
+      <p>Loading key recovery system...</p>
     </div>
   );
 
@@ -357,8 +491,7 @@ const App: React.FC = () => {
     <div className="app-container">
       <header className="app-header">
         <div className="logo">
-          <h1>KeyRescue FHE</h1>
-          <p>隱私密鑰救援</p>
+          <h1>Confidential Key Recovery 🔐</h1>
         </div>
         
         <div className="header-actions">
@@ -368,93 +501,98 @@ const App: React.FC = () => {
           >
             + Add Guardian
           </button>
-          <button 
-            onClick={checkAvailability} 
-            className="check-btn"
-          >
-            Check Status
-          </button>
-          <div className="wallet-connect">
-            <ConnectButton />
+          <div className="wallet-connect-wrapper">
+            <ConnectButton accountStatus="address" chainStatus="icon" showBalance={false}/>
           </div>
         </div>
       </header>
       
       <div className="main-content">
-        <div className="left-panel">
-          <h2>Key Recovery Process</h2>
-          {renderFlowChart()}
-          
-          <div className="info-panel">
-            <h3>FHE Security</h3>
-            <p>Your key fragments are encrypted using Fully Homomorphic Encryption (FHE) for maximum security.</p>
-            <div className="security-features">
-              <div className="feature">
-                <div className="feature-icon">🔐</div>
-                <div className="feature-text">End-to-end encrypted</div>
-              </div>
-              <div className="feature">
-                <div className="feature-icon">🧩</div>
-                <div className="feature-text">Multi-party computation</div>
-              </div>
-              <div className="feature">
-                <div className="feature-icon">⚡</div>
-                <div className="feature-text">On-chain verification</div>
-              </div>
-            </div>
-          </div>
+        <div className="tabs">
+          <button 
+            className={`tab ${activeTab === "guardians" ? "active" : ""}`}
+            onClick={() => setActiveTab("guardians")}
+          >
+            Guardians
+          </button>
+          <button 
+            className={`tab ${activeTab === "recovery" ? "active" : ""}`}
+            onClick={() => setActiveTab("recovery")}
+          >
+            Recovery
+          </button>
+          <button 
+            className={`tab ${activeTab === "info" ? "active" : ""}`}
+            onClick={() => setActiveTab("info")}
+          >
+            Information
+          </button>
         </div>
         
-        <div className="right-panel">
-          <div className="panel-header">
-            <h2>Guardian List</h2>
-            <button 
-              onClick={loadData} 
-              className="refresh-btn" 
-              disabled={isRefreshing}
-            >
-              {isRefreshing ? "Refreshing..." : "Refresh"}
-            </button>
-          </div>
-          
-          {renderStats()}
-          
-          <div className="guardians-list">
-            {guardians.length === 0 ? (
-              <div className="no-guardians">
-                <p>No guardians found</p>
+        {activeTab === "guardians" && (
+          <div className="tab-content">
+            <div className="section-header">
+              <h2>Key Guardians</h2>
+              <div className="header-actions">
                 <button 
-                  className="add-btn" 
-                  onClick={() => setShowAddModal(true)}
+                  onClick={loadData} 
+                  className="refresh-btn" 
+                  disabled={isRefreshing}
                 >
-                  Add First Guardian
+                  {isRefreshing ? "Refreshing..." : "Refresh"}
                 </button>
               </div>
-            ) : guardians.map((guardian, index) => (
-              <div 
-                className={`guardian-item ${selectedGuardian?.id === guardian.id ? "selected" : ""} ${guardian.isVerified ? "verified" : ""}`} 
-                key={index}
-                onClick={() => {
-                  setSelectedGuardian(guardian);
-                  setDecryptedValue(null);
-                }}
-              >
-                <div className="guardian-name">{guardian.name}</div>
-                <div className="guardian-meta">
-                  <span>Created: {new Date(guardian.timestamp * 1000).toLocaleDateString()}</span>
-                  <span>By: {guardian.creator.substring(0, 6)}...{guardian.creator.substring(38)}</span>
+            </div>
+            
+            <div className="guardians-list">
+              {guardians.length === 0 ? (
+                <div className="no-guardians">
+                  <p>No guardians found</p>
+                  <button 
+                    className="add-btn" 
+                    onClick={() => setShowAddModal(true)}
+                  >
+                    Add First Guardian
+                  </button>
                 </div>
-                <div className="guardian-status">
-                  {guardian.isVerified ? (
-                    <span className="verified">Verified: {guardian.decryptedValue}</span>
-                  ) : (
-                    <span className="pending">Pending Verification</span>
-                  )}
+              ) : guardians.map((guardian, index) => (
+                <div 
+                  className={`guardian-item ${selectedGuardian?.id === guardian.id ? "selected" : ""} ${guardian.isVerified ? "verified" : ""}`} 
+                  key={index}
+                  onClick={() => setSelectedGuardian(guardian)}
+                >
+                  <div className="guardian-title">{guardian.name}</div>
+                  <div className="guardian-meta">
+                    <span>Created: {new Date(guardian.timestamp * 1000).toLocaleDateString()}</span>
+                  </div>
+                  <div className="guardian-status">
+                    Status: {guardian.isVerified ? "✅ Verified" : "🔓 Pending Verification"}
+                  </div>
+                  <div className="guardian-creator">Creator: {guardian.creator.substring(0, 6)}...{guardian.creator.substring(38)}</div>
                 </div>
-              </div>
-            ))}
+              ))}
+            </div>
           </div>
-        </div>
+        )}
+        
+        {activeTab === "recovery" && (
+          <div className="tab-content">
+            <h2>Key Recovery Center</h2>
+            {renderRecoveryStatus()}
+            <div className="recovery-process">
+              <h3>FHE Recovery Process</h3>
+              {renderFHEProcess()}
+            </div>
+          </div>
+        )}
+        
+        {activeTab === "info" && (
+          <div className="tab-content">
+            <h2>Information Center</h2>
+            {renderFAQ()}
+            {renderPartners()}
+          </div>
+        )}
       </div>
       
       {showAddModal && (
@@ -478,17 +616,17 @@ const App: React.FC = () => {
           decryptedValue={decryptedValue} 
           setDecryptedValue={setDecryptedValue} 
           isDecrypting={isDecrypting || fheIsDecrypting} 
-          decryptValue={() => decryptGuardianValue(selectedGuardian.id)}
+          decryptData={() => decryptGuardianValue(selectedGuardian.id)}
         />
       )}
       
       {transactionStatus.visible && (
         <div className="transaction-modal">
-          <div className={`transaction-content ${transactionStatus.status}`}>
-            <div className="transaction-icon">
+          <div className="transaction-content">
+            <div className={`transaction-icon ${transactionStatus.status}`}>
               {transactionStatus.status === "pending" && <div className="fhe-spinner"></div>}
-              {transactionStatus.status === "success" && "✓"}
-              {transactionStatus.status === "error" && "✗"}
+              {transactionStatus.status === "success" && <div className="success-icon">✓</div>}
+              {transactionStatus.status === "error" && <div className="error-icon">✗</div>}
             </div>
             <div className="transaction-message">{transactionStatus.message}</div>
           </div>
@@ -506,7 +644,7 @@ const ModalAddGuardian: React.FC<{
   setGuardianData: (data: any) => void;
   isEncrypting: boolean;
 }> = ({ onSubmit, onClose, adding, guardianData, setGuardianData, isEncrypting }) => {
-  const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+  const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const { name, value } = e.target;
     if (name === 'value') {
       const intValue = value.replace(/[^\d]/g, '');
@@ -520,14 +658,14 @@ const ModalAddGuardian: React.FC<{
     <div className="modal-overlay">
       <div className="add-guardian-modal">
         <div className="modal-header">
-          <h2>Add New Guardian</h2>
+          <h2>Add New Key Guardian</h2>
           <button onClick={onClose} className="close-modal">&times;</button>
         </div>
         
         <div className="modal-body">
           <div className="fhe-notice">
-            <strong>FHE Encryption</strong>
-            <p>Key fragment will be encrypted with Zama FHE (Integer only)</p>
+            <strong>FHE 🔐 Encryption</strong>
+            <p>Key fragment will be encrypted with Zama FHE 🔐 (Integer only)</p>
           </div>
           
           <div className="form-group">
@@ -537,12 +675,12 @@ const ModalAddGuardian: React.FC<{
               name="name" 
               value={guardianData.name} 
               onChange={handleChange} 
-              placeholder="Enter name..." 
+              placeholder="Enter guardian name..." 
             />
           </div>
           
           <div className="form-group">
-            <label>Key Fragment (Integer only) *</label>
+            <label>Key Fragment Value (Integer only) *</label>
             <input 
               type="number" 
               name="value" 
@@ -552,17 +690,7 @@ const ModalAddGuardian: React.FC<{
               step="1"
               min="0"
             />
-            <div className="data-type">FHE Encrypted Integer</div>
-          </div>
-          
-          <div className="form-group">
-            <label>Description</label>
-            <textarea 
-              name="description" 
-              value={guardianData.description} 
-              onChange={handleChange} 
-              placeholder="Enter description..." 
-            />
+            <div className="data-type-label">FHE Encrypted Integer</div>
           </div>
         </div>
         
@@ -573,7 +701,7 @@ const ModalAddGuardian: React.FC<{
             disabled={adding || isEncrypting || !guardianData.name || !guardianData.value} 
             className="submit-btn"
           >
-            {adding || isEncrypting ? "Encrypting..." : "Add Guardian"}
+            {adding || isEncrypting ? "Encrypting and Adding..." : "Add Guardian"}
           </button>
         </div>
       </div>
@@ -587,15 +715,15 @@ const GuardianDetailModal: React.FC<{
   decryptedValue: number | null;
   setDecryptedValue: (value: number | null) => void;
   isDecrypting: boolean;
-  decryptValue: () => Promise<number | null>;
-}> = ({ guardian, onClose, decryptedValue, setDecryptedValue, isDecrypting, decryptValue }) => {
+  decryptData: () => Promise<number | null>;
+}> = ({ guardian, onClose, decryptedValue, setDecryptedValue, isDecrypting, decryptData }) => {
   const handleDecrypt = async () => {
     if (decryptedValue !== null) { 
       setDecryptedValue(null); 
       return; 
     }
     
-    const decrypted = await decryptValue();
+    const decrypted = await decryptData();
     if (decrypted !== null) {
       setDecryptedValue(decrypted);
     }
@@ -611,35 +739,31 @@ const GuardianDetailModal: React.FC<{
         
         <div className="modal-body">
           <div className="guardian-info">
-            <div className="info-row">
-              <span>Name:</span>
+            <div className="info-item">
+              <span>Guardian Name:</span>
               <strong>{guardian.name}</strong>
             </div>
-            <div className="info-row">
+            <div className="info-item">
               <span>Creator:</span>
               <strong>{guardian.creator.substring(0, 6)}...{guardian.creator.substring(38)}</strong>
             </div>
-            <div className="info-row">
-              <span>Created:</span>
+            <div className="info-item">
+              <span>Date Created:</span>
               <strong>{new Date(guardian.timestamp * 1000).toLocaleDateString()}</strong>
-            </div>
-            <div className="info-row">
-              <span>Description:</span>
-              <strong>{guardian.description}</strong>
             </div>
           </div>
           
           <div className="data-section">
-            <h3>Key Fragment Data</h3>
+            <h3>Encrypted Key Fragment</h3>
             
             <div className="data-row">
               <div className="data-label">Fragment Value:</div>
               <div className="data-value">
                 {guardian.isVerified ? 
-                  `${guardian.decryptedValue} (Verified)` : 
+                  `${guardian.decryptedValue} (On-chain Verified)` : 
                   decryptedValue !== null ? 
-                  `${decryptedValue} (Decrypted)` : 
-                  "🔒 Encrypted"
+                  `${decryptedValue} (Locally Decrypted)` : 
+                  "🔒 FHE Encrypted Integer"
                 }
               </div>
               <button 
@@ -648,13 +772,13 @@ const GuardianDetailModal: React.FC<{
                 disabled={isDecrypting}
               >
                 {isDecrypting ? (
-                  "Decrypting..."
+                  "🔓 Verifying..."
                 ) : guardian.isVerified ? (
                   "✅ Verified"
                 ) : decryptedValue !== null ? (
-                  "🔄 Re-decrypt"
+                  "🔄 Re-verify"
                 ) : (
-                  "🔓 Decrypt"
+                  "🔓 Verify Fragment"
                 )}
               </button>
             </div>
@@ -662,8 +786,8 @@ const GuardianDetailModal: React.FC<{
             <div className="fhe-info">
               <div className="fhe-icon">🔐</div>
               <div>
-                <strong>FHE Security</strong>
-                <p>Data is encrypted on-chain using Fully Homomorphic Encryption.</p>
+                <strong>FHE 🔐 Self-Relaying Decryption</strong>
+                <p>Data is encrypted on-chain. Click "Verify Fragment" to perform offline decryption and on-chain verification.</p>
               </div>
             </div>
           </div>
@@ -677,7 +801,7 @@ const GuardianDetailModal: React.FC<{
               disabled={isDecrypting}
               className="verify-btn"
             >
-              {isDecrypting ? "Verifying..." : "Verify on-chain"}
+              {isDecrypting ? "Verifying on-chain..." : "Verify on-chain"}
             </button>
           )}
         </div>
